@@ -29,16 +29,22 @@ SDK version, covering:
 - `com.google.android.gms.provider.action.PICK_IMAGES`
   (Google Play services photo picker backport)
 
-## Xposed API: libxposed 102
+## Xposed API: libxposed 102 + legacy api:82 dual entry
 
-The legacy `de.robv.android.xposed:api:82` interface is deprecated. This fork
-targets the modern libxposed API (`io.github.libxposed:api:102.0.0`):
+The module ships two entry points so it is recognized by both modern and
+legacy Xposed frameworks:
 
-- Entry point moved from `assets/xposed_init` to
-  `META-INF/xposed/java_init.list`.
-- Requires an LSPosed implementation with libxposed API 102 support
-  (current actively maintained LSPosed forks, e.g. Vector/JingMatrix).
-  Legacy-only Xposed frameworks cannot load this module.
+- **Modern:** `META-INF/xposed/java_init.list` → `MainHook` (libxposed API
+  102, `io.github.libxposed:api:102.0.0`). Used by current LSPosed forks
+  (e.g. Vector/JingMatrix). The deprecated `de.robv.android.xposed:api:82`
+  interface is no longer the primary API.
+- **Legacy fallback:** `assets/xposed_init` → `LegacyMainHook`
+  (`de.robv.android.xposed:api:82`). Used by legacy-only frameworks that do
+  not detect `java_init.list`.
+
+Modern frameworks ignore the legacy entry when `java_init.list` is present,
+and legacy frameworks never load the modern class, so both coexist in one
+APK. All hook logic is shared in `HookCore`.
 
 ## Screenshots
 
