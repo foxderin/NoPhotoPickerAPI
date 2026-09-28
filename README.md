@@ -46,6 +46,23 @@ Modern frameworks ignore the legacy entry when `java_init.list` is present,
 and legacy frameworks never load the modern class, so both coexist in one
 APK. All hook logic is shared in `HookCore`.
 
+## Choosing the SAF handler
+
+Rewritten requests are routed through the module's own `InterceptActivity`,
+which lists every app that can handle the SAF intent plus "system default",
+then forwards the request and returns the result to the original app.
+
+This exists because OEM resolvers (e.g. ColorOS) send implicit
+`OPEN_DOCUMENT` requests straight to their own file manager, whose resolver
+skips the chooser dialog entirely - neither implicit resolution nor
+`Intent.createChooser` lets the user choose.
+
+SAF sources are limited to apps implementing a `DocumentsProvider`. Gallery
+apps (ColorOS 相册, Google Photos, Immich) do not, so they cannot appear as
+sources; the built-in "Images" root in DocumentsUI exposes all MediaStore
+photos/videos. Third-party providers (Google Drive, CIFS/SFTP document
+providers, file managers) appear automatically.
+
 ## Screenshots
 
 <details>

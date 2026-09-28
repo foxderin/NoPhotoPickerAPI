@@ -50,8 +50,10 @@ class LegacyMainHook : IXposedHookLoadPackage {
         return object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val args = param.args ?: return
+                val context = (param.thisObject as? android.content.Context)
+                    ?: args.firstOrNull { it is android.content.Context } as? android.content.Context
                 @Suppress("UNCHECKED_CAST")
-                HookCore.rewritePickerArgs(args as Array<Any?>, source)
+                HookCore.rewritePickerArgs(args as Array<Any?>, source, context)
             }
         }
     }

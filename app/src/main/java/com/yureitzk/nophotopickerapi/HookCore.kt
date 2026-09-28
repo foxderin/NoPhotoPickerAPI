@@ -1,7 +1,9 @@
 package com.yureitzk.nophotopickerapi
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.provider.MediaStore
 import android.util.Log
 
@@ -41,21 +43,29 @@ object HookCore {
         "com.android.server.am.ActivityStarter"
     )
 
+    private const val MODULE_PACKAGE = "com.yureitzk.nophotopickerapi"
+
+    /** Module-owned activity that lets the user pick which SAF handler to use. */
+    const val INTERCEPT_ACTIVITY = "com.yureitzk.nophotopickerapi.InterceptActivity"
+    const val EXTRA_DOC_INTENT = "npp_doc_intent"
+
     /**
      * Scans [args] for a Photo Picker intent and rewrites it in place to a SAF
      * ACTION_OPEN_DOCUMENT intent. Returns true if a rewrite happened.
      * Used by both the libxposed Chain interceptor and the legacy XC_MethodHook.
+     * [context] is any Context from the hooked call (Activity or Instrumentation
+     * `who`); null in system_server, where it is resolved reflectively.
      */
-    fun rewritePickerArgs(args: Array<Any?>, source: String): Boolean {
+    fun rewritePickerArgs(args: Array<Any?>, source: String, context: Context?): Boolean {
         for (i in args.indices) {
             val intent = args[i] as? Intent ?: continue
             if (isPhotoPickerIntent(intent)) {
                 logIntentDetails(intent, source)
-                val newIntent = buildDocumentPickerIntent(intent)
+                val newIntent = buildDocumentPickerIntent(intent, context)
                 args[i] = newIntent
 
                 if (i + 1 < args.size && (args[i + 1] == null || args[i + 1] is String)) {
-                    val newType = newIntent.type ?: "*/*"
+                    val newType = newIntent.type
                     args[i + 1] = newType
                     Log.d(TAG, "Updated resolvedType to $newType")
                 }
@@ -129,19 +139,22 @@ object HookCore {
                 (intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false) || getMaxItems(intent) > 1))
     }
 
-    private fun buildDocumentPickerIntent(original: Intent): Intent {
+    private fun buildDocumentPickerIntent(original: Intent, context: Context?): Intent {
         // ACTION_OPEN_DOCUMENT (SAF / DocumentsUI) instead of ACTION_GET_CONTENT:
         // Android 16 redirects image/video GET_CONTENT back to the system Photo Picker.
-        return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        val openDocument = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
 
             // A fresh implicit Intent: the Photo Picker's explicit component/package
-            // is intentionally not inherited, so the system resolves DocumentsUI/SAF.
+            // is intentionally not inherited.
 
             // Handle MIME types
-            val mimeTypes = original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
+            val sourceMimeTypes = original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
                 ?: original.getStringArrayExtra("android.provider.extra.MIME_TYPES")
-                ?: arrayOf(original.type ?: "image/*")
+            val mimeTypes = sourceMimeTypes
+                ?: original.type?.let { arrayOf(it) }
+                // No type at all means "any visual media" (image + video).
+                ?: arrayOf("image/*", "video/*")
 
             type = if (mimeTypes.size == 1) mimeTypes[0] else "*/*"
             if (mimeTypes.size > 1 || mimeTypes[0] != type) {
@@ -163,8 +176,23 @@ object HookCore {
 
             putExtra(FLAG, true)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            Log.d(TAG, "Converted action: $action, mime: $type, " +
-                    "allowMultiple: ${getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)}")
+        }
+
+        // Route through our own interceptor activity so the user can pick which
+        // SAF handler to use. OEMs (e.g. ColorOS) register their file manager as
+        // the default OPEN_DOCUMENT handler and their resolver skips the chooser
+        // dialog entirely, so neither implicit resolution nor createChooser gives
+        // the user a choice. The intercept activity is part of this installed
+        // module, hence always resolvable while the hook runs.
+        Log.d(TAG, "Converted action: ${openDocument.action}, mime: ${openDocument.type}, " +
+                "allowMultiple: ${openDocument.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)}")
+        return Intent(original.action ?: MediaStore.ACTION_PICK_IMAGES).apply {
+            setClassName(MODULE_PACKAGE, INTERCEPT_ACTIVITY)
+            type = openDocument.type
+            putExtra(EXTRA_DOC_INTENT, openDocument)
+            putExtra(FLAG, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            Log.d(TAG, "Targeting interceptor activity for user-side handler choice")
         }
     }
 }

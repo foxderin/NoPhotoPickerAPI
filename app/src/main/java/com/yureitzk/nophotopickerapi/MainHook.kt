@@ -67,8 +67,14 @@ class MainHook : XposedModule() {
 
     private fun interceptor(source: String) = XposedInterface.Hooker { chain ->
         val args = chain.args.toTypedArray()
-        HookCore.rewritePickerArgs(args, source)
+        HookCore.rewritePickerArgs(args, source, hookContext(chain.thisObject, args))
         chain.proceed(args)
+    }
+
+    /** Any Context reachable from the hooked call: `this` (Activity) or first arg (Instrumentation.who). */
+    private fun hookContext(thisObject: Any?, args: Array<Any?>): android.content.Context? {
+        (thisObject as? android.content.Context)?.let { return it }
+        return args.firstOrNull { it is android.content.Context } as? android.content.Context
     }
 
     private fun hookInstrumentation(packageName: String) {
