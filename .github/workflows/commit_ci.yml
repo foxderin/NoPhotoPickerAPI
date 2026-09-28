@@ -33,7 +33,7 @@ jobs:
         run: chmod +x gradlew
         
       - name: Cache Gradle packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
@@ -60,14 +60,14 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease      
 
-      - name: Build Release APK (Unsigned)
+      - name: Build Release APK (Debug-signed, no keystore secrets)
         if: "!startsWith(github.ref, 'refs/tags/')"
         run: ./gradlew assembleRelease
         
       - name: Get version info
         id: version
         run: |
-          VERSION=$(grep "versionName" app/build.gradle.kts | awk '{print $3}' | tr -d '"')
+          VERSION=$(grep "versionName" app/build.gradle | head -1 | awk '{print $2}' | tr -d '"')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
         

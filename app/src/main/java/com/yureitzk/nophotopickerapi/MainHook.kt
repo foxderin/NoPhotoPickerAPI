@@ -2,134 +2,170 @@ package com.yureitzk.nophotopickerapi
 
 import android.app.Activity
 import android.content.Intent
-import android.os.Build
-import android.os.ext.SdkExtensions
 import android.provider.MediaStore
 import android.util.Log
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
+import java.lang.reflect.Modifier
 
-class MainHook : IXposedHookLoadPackage {
+class MainHook : XposedModule() {
 
     companion object {
         private const val TAG = "NoPhotoPicker"
         private const val FLAG = "x_handled_by_nophoto"
+
+        // AndroidX ActivityResultContracts.PickVisualMedia system-fallback action.
+        // Constant exists in androidx.activity but is not part of the Android SDK.
+        private const val ACTION_SYSTEM_FALLBACK_PICK_IMAGES =
+            "androidx.activity.result.contract.action.PICK_IMAGES"
+
+        // Legacy/unofficial AndroidX action string kept for broad compatibility.
+        private const val ACTION_ANDROIDX_PICK_VISUAL_MEDIA =
+            "androidx.activity.result.contract.action.PickVisualMedia"
+
+        // Google Play services (GMS) photo picker backport action.
+        private const val ACTION_GMS_PICK_IMAGES =
+            "com.google.android.gms.provider.action.PICK_IMAGES"
+
+        // Max-items extras used by the AndroidX system-fallback picker and the GMS picker.
+        private const val EXTRA_SYSTEM_FALLBACK_PICK_IMAGES_MAX =
+            "androidx.activity.result.contract.extra.PICK_IMAGES_MAX"
+        private const val EXTRA_GMS_PICK_IMAGES_MAX =
+            "com.google.android.gms.provider.extra.PICK_IMAGES_MAX"
     }
 
-    fun XC_LoadPackage.LoadPackageParam.isSystemFramework(): Boolean {
-        return packageName == "android" || appInfo == null
+    override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
+        // System server is handled via onSystemServerStarting; avoid double-hooking.
+        if (param.packageName == "android") return
+
+        hookInstrumentation(param.packageName)
+        hookActivity(param.packageName)
+        hookActivityResult(param.packageName)
     }
 
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        when {
-            lpparam.isSystemFramework() -> {
-                hookSystemServices(lpparam)
-            }
-            lpparam.packageName != null -> {
-                hookInstrumentation(lpparam)
-                hookActivity(lpparam)
-                hookActivityResult(lpparam)
-            }
-        }
+    override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
+        hookSystemServices(param.classLoader)
     }
 
-    private fun hookSystemServices(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val classLoader = lpparam.classLoader
+    private fun hookSystemServices(classLoader: ClassLoader) {
         val serviceClasses = listOf(
             "com.android.server.wm.ActivityTaskManagerService",
             "com.android.server.am.ActivityManagerService",
+            // Android 10+ (incl. Android 16); pre-10 it lived in com.android.server.am
+            "com.android.server.wm.ActivityStarter",
             "com.android.server.am.ActivityStarter"
         )
 
         for (className in serviceClasses) {
-            val serviceClass = XposedHelpers.findClassIfExists(className, classLoader)
-            if (serviceClass != null) {
-                XposedBridge.hookAllMethods(
-                    serviceClass,
-                    "startActivity",
-                    createIntentInterceptor("System:$className")
-                )
-
-                Log.d(TAG, "Hooked $className")
+            val serviceClass = findClassIfExists(className, classLoader) ?: continue
+            val hooked = hookAllMethods(serviceClass, "startActivity", intentInterceptor("System:$className"))
+            if (hooked > 0) {
+                Log.d(TAG, "Hooked $className ($hooked startActivity methods)")
                 return
             }
         }
     }
 
-    private fun createIntentInterceptor(source: String): XC_MethodHook {
-        return object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                for (i in args.indices) {
-                    if (args[i] is Intent) {
-                        val intent = args[i] as Intent
-                        if (isPhotoPickerIntent(intent)) {
-                            logIntentDetails(intent, source)
-                            val newIntent = buildDocumentPickerIntent(intent)
-                            args[i] = newIntent
+    private fun findClassIfExists(className: String, classLoader: ClassLoader): Class<*>? {
+        return try {
+            Class.forName(className, false, classLoader)
+        } catch (t: Throwable) {
+            null
+        }
+    }
 
-                            if (i + 1 < args.size && (args[i + 1] == null || args[i + 1] is String)) {
-                                val newType = newIntent.type ?: "*/*"
-                                args[i + 1] = newType
-                                Log.d(TAG, "Updated resolvedType to $newType")                            }
-                            return
-                        }
-                    }
-                }
+    /** Hooks every non-abstract overload of [methodName]; returns the number of hooked methods. */
+    private fun hookAllMethods(
+        clazz: Class<*>,
+        methodName: String,
+        hooker: XposedInterface.Hooker
+    ): Int {
+        var hooked = 0
+        for (method in clazz.declaredMethods) {
+            if (method.name != methodName || Modifier.isAbstract(method.modifiers)) continue
+            try {
+                hook(method).intercept(hooker)
+                hooked++
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to hook ${clazz.name}#$methodName: $t")
             }
         }
+        return hooked
     }
 
-    private fun hookInstrumentation(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun intentInterceptor(source: String) = XposedInterface.Hooker { chain ->
+        val args = chain.args.toTypedArray()
+        for (i in args.indices) {
+            val intent = args[i] as? Intent ?: continue
+            if (isPhotoPickerIntent(intent)) {
+                logIntentDetails(intent, source)
+                val newIntent = buildDocumentPickerIntent(intent)
+                args[i] = newIntent
+
+                if (i + 1 < args.size && (args[i + 1] == null || args[i + 1] is String)) {
+                    val newType = newIntent.type ?: "*/*"
+                    args[i + 1] = newType
+                    Log.d(TAG, "Updated resolvedType to $newType")
+                }
+                break
+            } else if (BuildConfig.DEBUG &&
+                intent.action?.contains("PICK", ignoreCase = true) == true
+            ) {
+                // Debug builds only: surface pick-like actions we don't handle yet.
+                Log.d(TAG, "[$source] Unrecognized pick-like action: ${intent.action}")
+            }
+        }
+        chain.proceed(args)
+    }
+
+    private fun hookInstrumentation(packageName: String) {
         try {
-            XposedBridge.hookAllMethods(
+            val hooked = hookAllMethods(
                 android.app.Instrumentation::class.java,
                 "execStartActivity",
-                createIntentInterceptor("Instrumentation.execStartActivity")
+                intentInterceptor("Instrumentation.execStartActivity")
             )
-            Log.d(TAG, "Hooked Instrumentation for ${lpparam.packageName}")
+            Log.d(TAG, "Hooked Instrumentation for $packageName ($hooked methods)")
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook Instrumentation: ${t.message}")
+            Log.e(TAG, "Failed to hook Instrumentation: ${t.message}")
         }
     }
 
-    private fun hookActivity(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookActivity(packageName: String) {
         try {
             val activityMethods = listOf("startActivity", "startActivityForResult")
 
             for (methodName in activityMethods) {
-                XposedBridge.hookAllMethods(
+                hookAllMethods(
                     Activity::class.java,
                     methodName,
-                    createIntentInterceptor("App.Activity.$methodName")
+                    intentInterceptor("App.Activity.$methodName")
                 )
             }
-            Log.d(TAG, "Successfully hooked Activity methods for ${lpparam.packageName}")
+            Log.d(TAG, "Successfully hooked Activity methods for $packageName")
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook Activity: ${t.message}")
+            Log.e(TAG, "Failed to hook Activity: ${t.message}")
         }
     }
 
-    private fun hookActivityResult(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookActivityResult(packageName: String) {
         try {
-            XposedHelpers.findAndHookMethod(
-                Activity::class.java,
-                "onActivityResult",
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                Intent::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val requestCode = param.args[0] as Int
-                        val resultCode = param.args[1] as Int
-                        val data = param.args[2] as? Intent
+            val onActivityResult = Activity::class.java.declaredMethods.firstOrNull {
+                it.name == "onActivityResult" && it.parameterTypes.contentEquals(
+                    arrayOf(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Intent::class.java)
+                )
+            } ?: throw NoSuchMethodException("Activity.onActivityResult(int, int, Intent)")
 
-                        // Skip if canceled or no data
-                        if (resultCode != Activity.RESULT_OK || data == null) return
+            hook(onActivityResult).intercept(
+                XposedInterface.Hooker { chain ->
+                    val args = chain.args.toTypedArray()
+                    val requestCode = args[0] as Int
+                    val resultCode = args[1] as Int
+                    val data = args[2] as? Intent
 
+                    // Skip if canceled or no data
+                    if (resultCode == Activity.RESULT_OK && data != null) {
                         val hasContent = when {
                             data.data != null -> true
                             data.clipData?.let { clipData ->
@@ -142,54 +178,59 @@ class MainHook : IXposedHookLoadPackage {
 
                         if (!hasContent) {
                             Log.d(TAG, "Empty result detected for request $requestCode")
-                            param.args[1] = Activity.RESULT_CANCELED
-                            param.args[2] = null
+                            args[1] = Activity.RESULT_CANCELED
+                            args[2] = null
                         }
                     }
+                    chain.proceed(args)
                 }
             )
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook onActivityResult: ${t.message}")
+            Log.e(TAG, "Failed to hook onActivityResult: ${t.message}")
         }
     }
 
     private fun getMaxItems(intent: Intent): Int {
-        return if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ||
-            SdkExtensions.getExtensionVersion(Build.VERSION_CODES.R) >= 2
-        ) {
-            intent.getIntExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, -1)
-        } else {
-            -1
-        }
+        // All three constants are compile-time inlined strings, safe on any API level.
+        val frameworkMax = intent.getIntExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, -1)
+        if (frameworkMax > 0) return frameworkMax
+        val fallbackMax = intent.getIntExtra(EXTRA_SYSTEM_FALLBACK_PICK_IMAGES_MAX, -1)
+        if (fallbackMax > 0) return fallbackMax
+        return intent.getIntExtra(EXTRA_GMS_PICK_IMAGES_MAX, -1)
     }
 
     private fun isPhotoPickerIntent(intent: Intent): Boolean {
         if (intent.hasExtra(FLAG)) return false
-        return when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
-                intent.action == MediaStore.ACTION_PICK_IMAGES
-            SdkExtensions.getExtensionVersion(Build.VERSION_CODES.R) >= 2 ->
-                intent.action == MediaStore.ACTION_PICK_IMAGES ||
-                        intent.action == "androidx.activity.result.contract.action.PickVisualMedia"
-
+        // No SDK_INT gating: AndroidX/GMS fallback actions must match on Android 16 too.
+        return when (intent.action) {
+            MediaStore.ACTION_PICK_IMAGES,
+            ACTION_SYSTEM_FALLBACK_PICK_IMAGES,
+            ACTION_ANDROIDX_PICK_VISUAL_MEDIA,
+            ACTION_GMS_PICK_IMAGES -> true
             else -> false
         }
     }
 
     private fun logIntentDetails(intent: Intent, source: String) {
         Log.d(TAG, "[$source] Photo picker detected")
-        Log.d(TAG, "  Action: ${intent.action}")
+        Log.d(TAG, "  Original action: ${intent.action}")
+        Log.d(TAG, "  Mime type: ${intent.type}")
+        Log.d(TAG, "  Allow multiple: " +
+                (intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false) || getMaxItems(intent) > 1))
     }
 
     private fun buildDocumentPickerIntent(original: Intent): Intent {
-        return Intent(Intent.ACTION_GET_CONTENT).apply {
+        // ACTION_OPEN_DOCUMENT (SAF / DocumentsUI) instead of ACTION_GET_CONTENT:
+        // Android 16 redirects image/video GET_CONTENT back to the system Photo Picker.
+        return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
+
+            // A fresh implicit Intent: the Photo Picker's explicit component/package
+            // is intentionally not inherited, so the system resolves DocumentsUI/SAF.
 
             // Handle MIME types
             val mimeTypes = original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
                 ?: original.getStringArrayExtra("android.provider.extra.MIME_TYPES")
-                ?: original.getStringArrayExtra("androidx.activity.result.contract.extra.PickVisualMedia.MimeType")
                 ?: arrayOf(original.type ?: "image/*")
 
             type = if (mimeTypes.size == 1) mimeTypes[0] else "*/*"
@@ -197,24 +238,23 @@ class MainHook : IXposedHookLoadPackage {
                 putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
             }
 
-            // Handle multi-select with API compatibility
+            // Handle multi-select
             val allowMultiple = original.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
             val maxItems = getMaxItems(original)
 
-            val shouldAllowMultiple = when {
-                allowMultiple -> true
-                maxItems > 1 -> true
-                else -> false
-            }
-
-            if (shouldAllowMultiple) {
+            if (allowMultiple || maxItems > 1) {
                 putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                Log.d(TAG, "Multi-select enabled")
+                if (maxItems > 1) {
+                    // Pass through for SAF providers that honor it; DocumentsUI ignores it.
+                    putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maxItems)
+                }
+                Log.d(TAG, "Multi-select enabled (maxItems=$maxItems)")
             }
 
             putExtra(FLAG, true)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            Log.d(TAG, "Created document picker intent")
+            Log.d(TAG, "Converted action: $action, mime: $type, " +
+                    "allowMultiple: ${getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)}")
         }
     }
 }
