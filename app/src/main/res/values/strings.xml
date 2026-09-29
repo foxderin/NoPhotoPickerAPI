@@ -3,4 +3,7 @@
     <string name="app_description">Bypasses the Android Photo Picker API and lets apps use the classic document/file picker</string>
     <string name="choose_picker">选择文件选择器</string>
     <string name="system_default">系统默认</string>
+    <string name="config_hint">不拦截：该应用的选图请求保持原样（不重定向到文件选择器）；兼容模式：把选中内容复制到本地缓存后再返回（给不识 SAF 的旧应用）</string>
+    <string name="config_blocked">不拦截</string>
+    <string name="config_compat">兼容模式</string>
 </resources>

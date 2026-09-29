@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material You: wallpaper-derived dynamic colors on Android 12+,
+         static MD3 baseline palette on API 30. -->
+    <style name="Theme.NoPhotoPicker" parent="Theme.Material3.DynamicColors.DayNight.NoActionBar"/>
+
+    <!-- Dialog surface for the SAF handler chooser shown over the calling app. -->
+    <style name="Theme.NoPhotoPicker.Dialog" parent="Theme.Material3.DayNight.Dialog.Alert"/>
+</resources>

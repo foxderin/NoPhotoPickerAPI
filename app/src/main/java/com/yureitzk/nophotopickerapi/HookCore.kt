@@ -48,7 +48,43 @@ object HookCore {
     /** Module-owned activity that lets the user pick which SAF handler to use. */
     const val INTERCEPT_ACTIVITY = "com.yureitzk.nophotopickerapi.InterceptActivity"
     const val EXTRA_DOC_INTENT = "npp_doc_intent"
+    const val EXTRA_CALLING_PACKAGE = "npp_calling_package"
 
+    /**
+     * Best-effort caller package for a hooked startActivity-style call.
+     * The system_server hook runs on the caller's binder thread, so
+     * Binder.getCallingUid() is authoritative there; app-side hooks fall back
+     * to the hooked context's own package, and the args heuristic (…, String
+     * callingPackage, String? callingFeatureId, Intent, …) covers the rest.
+     */
+    private fun getCallingPackage(args: Array<Any?>, intentIndex: Int, context: Context?): String? {
+        try {
+            val uid = android.os.Binder.getCallingUid()
+            if (uid > 0 && uid != android.os.Process.myUid() && uid != 1000) {
+                val pm = context?.packageManager ?: systemPackageManager()
+                val packages = pm?.getPackagesForUid(uid)
+                packages?.firstOrNull()?.let { return it }
+            }
+        } catch (t: Throwable) {
+            // Fall through to the heuristics below.
+        }
+        if (intentIndex >= 2 && args[intentIndex - 2] is String) {
+            return args[intentIndex - 2] as String
+        }
+        return context?.packageName?.takeIf { it != "android" }
+    }
+
+    private fun systemPackageManager(): android.content.pm.PackageManager? {
+        return try {
+            val activityThread = Class.forName("android.app.ActivityThread")
+            val thread = activityThread.getMethod("currentActivityThread").invoke(null)
+            val ctx = activityThread.getMethod("getSystemContext").invoke(thread)
+                    as? android.content.Context
+            ctx?.packageManager
+        } catch (t: Throwable) {
+            null
+        }
+    }
     /**
      * Scans [args] for a Photo Picker intent and rewrites it in place to a SAF
      * ACTION_OPEN_DOCUMENT intent. Returns true if a rewrite happened.
@@ -60,8 +96,13 @@ object HookCore {
         for (i in args.indices) {
             val intent = args[i] as? Intent ?: continue
             if (isPhotoPickerIntent(intent)) {
+                val caller = getCallingPackage(args, i, context)
+                if (caller != null && caller in HookConfig.get(context).blocked) {
+                    Log.d(TAG, "[$source] Caller $caller is excluded, leaving picker intact")
+                    return false
+                }
                 logIntentDetails(intent, source)
-                val newIntent = buildDocumentPickerIntent(intent, context)
+                val newIntent = buildDocumentPickerIntent(intent, context, caller)
                 args[i] = newIntent
 
                 if (i + 1 < args.size && (args[i + 1] == null || args[i + 1] is String)) {
@@ -139,7 +180,7 @@ object HookCore {
                 (intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false) || getMaxItems(intent) > 1))
     }
 
-    private fun buildDocumentPickerIntent(original: Intent, context: Context?): Intent {
+    private fun buildDocumentPickerIntent(original: Intent, context: Context?, caller: String?): Intent {
         // ACTION_OPEN_DOCUMENT (SAF / DocumentsUI) instead of ACTION_GET_CONTENT:
         // Android 16 redirects image/video GET_CONTENT back to the system Photo Picker.
         val openDocument = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -175,9 +216,13 @@ object HookCore {
             }
 
             putExtra(FLAG, true)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+            // PERSISTABLE lets the final caller takePersistableUriPermission();
+            // the grant chain only propagates it if every hop requests it.
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
 
+
+        }
         // Route through our own interceptor activity so the user can pick which
         // SAF handler to use. OEMs (e.g. ColorOS) register their file manager as
         // the default OPEN_DOCUMENT handler and their resolver skips the chooser
@@ -190,8 +235,10 @@ object HookCore {
             setClassName(MODULE_PACKAGE, INTERCEPT_ACTIVITY)
             type = openDocument.type
             putExtra(EXTRA_DOC_INTENT, openDocument)
+            if (caller != null) putExtra(EXTRA_CALLING_PACKAGE, caller)
             putExtra(FLAG, true)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             Log.d(TAG, "Targeting interceptor activity for user-side handler choice")
         }
     }

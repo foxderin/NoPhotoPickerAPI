@@ -49,8 +49,9 @@ APK. All hook logic is shared in `HookCore`.
 ## Choosing the SAF handler
 
 Rewritten requests are routed through the module's own `InterceptActivity`,
-which lists every app that can handle the SAF intent plus "system default",
-then forwards the request and returns the result to the original app.
+which lists every app that can handle the SAF intent (with icons, Material
+Design 3 / dynamic colors) plus "system default", then forwards the request
+and returns the result to the original app.
 
 This exists because OEM resolvers (e.g. ColorOS) send implicit
 `OPEN_DOCUMENT` requests straight to their own file manager, whose resolver
