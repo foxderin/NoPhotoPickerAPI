@@ -37,6 +37,7 @@ class InterceptActivity : AppCompatActivity() {
         CompatCache.cleanup(this)
 
         callingPackage = intent.getStringExtra(HookCore.EXTRA_CALLING_PACKAGE)
+            ?: callingActivity?.packageName
 
         @Suppress("DEPRECATION")
         val docIntent = intent.getParcelableExtra(HookCore.EXTRA_DOC_INTENT) as? Intent
@@ -72,6 +73,13 @@ class InterceptActivity : AppCompatActivity() {
             .setTitle(R.string.choose_picker)
             .setAdapter(adapter) { _, which ->
                 val target = Intent(docIntent)
+                // The system_server hook code is boot-time stale and cannot add
+                // these; inject them here (app-side code is live) so the
+                // bridged picker can grant the result URI to every hop.
+                target.putStringArrayListExtra(
+                    HookCore.EXTRA_GRANT_TARGETS,
+                    ArrayList(listOfNotNull(callingPackage, packageName))
+                )
                 val info = entries[which].info
                 if (info != null) {
                     target.component = ComponentName(info.packageName, info.name)
@@ -91,6 +99,12 @@ class InterceptActivity : AppCompatActivity() {
         // Re-flag so the URI grant (incl. persistable) propagates to the caller.
         data?.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        // Belt and braces: the framework's flag propagation can drop the grant
+        // when the result crosses several apps (bridged pickers), so grant the
+        // URIs we hold to the original caller explicitly.
+        if (resultCode == RESULT_OK && data != null) {
+            grantResultUrisToCaller(data)
+        }
         if (resultCode == RESULT_OK && data != null &&
             callingPackage != null && callingPackage in AppConfig.getCompat(this)
         ) {
@@ -112,13 +126,54 @@ class InterceptActivity : AppCompatActivity() {
             }.start()
             return
         }
-        setResult(resultCode, data)
-        finish()
+        try {
+            setResult(resultCode, data)
+            finish()
+        } catch (t: Throwable) {
+            // The system can refuse the URI grant when the chain crosses apps
+            // it cannot verify. The provider owner granted the caller directly
+            // (see HookCore grant targets), so retry with the grant flags
+            // stripped — the caller still has access.
+            Log.w(HookCore.TAG, "granted delivery failed, retrying plain: $t")
+            try {
+                val plain = Intent().apply {
+                    this.data = data?.data
+                    this.clipData = data?.clipData
+                }
+                setResult(resultCode, plain)
+                finish()
+            } catch (t2: Throwable) {
+                Log.e(HookCore.TAG, "finish failed: $t2")
+                try {
+                    setResult(RESULT_CANCELED)
+                    finish()
+                } catch (t3: Throwable) {
+                    Log.e(HookCore.TAG, "cancel finish failed: $t3")
+                }
+            }
+        }
     }
 
     private fun finishCancelled() {
         setResult(RESULT_CANCELED)
         finish()
+    }
+
+    /** Grants every result URI to the original caller, if we hold it. */
+    private fun grantResultUrisToCaller(data: Intent) {
+        val target = callingPackage ?: return
+        val uris = ArrayList<android.net.Uri>()
+        data.data?.let { uris.add(it) }
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let { uris.add(it) }
+        }
+        for (uri in uris) {
+            try {
+                grantUriPermission(target, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (t: Throwable) {
+                Log.w(HookCore.TAG, "grant to $target failed for $uri: $t")
+            }
+        }
     }
 
     /** All distinct apps handling the SAF intent, in system precedence order. */

@@ -50,6 +50,9 @@ object HookCore {
     const val EXTRA_DOC_INTENT = "npp_doc_intent"
     const val EXTRA_CALLING_PACKAGE = "npp_calling_package"
 
+    /** Packages the provider owner should grant the picked URI to directly. */
+    const val EXTRA_GRANT_TARGETS = "npp_grant_targets"
+
     /**
      * Best-effort caller package for a hooked startActivity-style call.
      * The system_server hook runs on the caller's binder thread, so
@@ -220,6 +223,15 @@ object HookCore {
             // the grant chain only propagates it if every hop requests it.
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+
+            // The bridged picker (e.g. ColorOS file manager) is reached with
+            // this inner intent; carry the packages that must end up holding
+            // the result URI so the provider owner can grant them directly —
+            // framework propagation is unreliable across several apps.
+            val targets = ArrayList<String>()
+            caller?.let { targets.add(it) }
+            targets.add(MODULE_PACKAGE)
+            putStringArrayListExtra(EXTRA_GRANT_TARGETS, targets)
 
 
         }
