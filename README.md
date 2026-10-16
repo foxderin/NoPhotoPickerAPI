@@ -10,6 +10,20 @@ and allow users to the classic document/file picker.
 > [!IMPORTANT]
 > Tested on a limited number of devices. Your experience may vary, and bugs are possible.
 
+## Android 16
+
+This fork keeps the upstream Xposed entry and only adds the basic Android 16
+bypass: Photo Picker requests go directly to `ACTION_OPEN_DOCUMENT` instead of
+`ACTION_GET_CONTENT`, which Android 16 may route back to the Photo Picker.
+Android 11-15 retain the upstream `ACTION_GET_CONTENT` route.
+
+The system chooses the document/file picker. There is no module settings screen,
+custom handler chooser, URI relay, or compatibility cache. Image/video filters
+and multi-selection are preserved; a request without a MIME type allows both
+images and videos. SAF does not enforce the Photo Picker's maximum item count.
+
+An Android 16 Xposed framework with legacy API support is required.
+
 ## Screenshots
 
 <details>
@@ -26,6 +40,7 @@ and allow users to the classic document/file picker.
 ## Supported OSes
 
 - Android 11-15 (Custom ROMs are **not** supported)
+- Android 16: basic document-picker bypass
 
 ## Usage
 

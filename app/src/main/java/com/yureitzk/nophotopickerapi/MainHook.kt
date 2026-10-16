@@ -71,10 +71,11 @@ class MainHook : IXposedHookLoadPackage {
                             val newIntent = buildDocumentPickerIntent(intent)
                             args[i] = newIntent
 
-                            if (i + 1 < args.size && (args[i + 1] == null || args[i + 1] is String)) {
-                                val newType = newIntent.type ?: "*/*"
-                                args[i + 1] = newType
-                                Log.d(TAG, "Updated resolvedType to $newType")                            }
+                            // A null Bundle is not a resolvedType; use the hooked signature.
+                            if ((param.method as java.lang.reflect.Method).parameterTypes
+                                    .getOrNull(i + 1) == String::class.java) {
+                                args[i + 1] = newIntent.type
+                            }
                             return
                         }
                     }
@@ -183,14 +184,22 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun buildDocumentPickerIntent(original: Intent): Intent {
-        return Intent(Intent.ACTION_GET_CONTENT).apply {
+        // Android 16 may route GET_CONTENT back to the Photo Picker.
+        val action = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            Intent.ACTION_OPEN_DOCUMENT
+        } else {
+            Intent.ACTION_GET_CONTENT
+        }
+        return Intent(action).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
 
             // Handle MIME types
-            val mimeTypes = original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
+            val mimeTypes = (original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
                 ?: original.getStringArrayExtra("android.provider.extra.MIME_TYPES")
-                ?: original.getStringArrayExtra("androidx.activity.result.contract.extra.PickVisualMedia.MimeType")
-                ?: arrayOf(original.type ?: "image/*")
+                ?: original.getStringArrayExtra("androidx.activity.result.contract.extra.PickVisualMedia.MimeType"))
+                ?.takeIf { it.isNotEmpty() }
+                ?: original.type?.let { arrayOf(it) }
+                ?: arrayOf("image/*", "video/*")
 
             type = if (mimeTypes.size == 1) mimeTypes[0] else "*/*"
             if (mimeTypes.size > 1 || mimeTypes[0] != type) {
