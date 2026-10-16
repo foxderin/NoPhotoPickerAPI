@@ -6,151 +6,150 @@ import android.os.Build
 import android.os.ext.SdkExtensions
 import android.provider.MediaStore
 import android.util.Log
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
+import java.lang.reflect.Modifier
 
-class MainHook : IXposedHookLoadPackage {
+class MainHook : XposedModule() {
 
     companion object {
         private const val TAG = "NoPhotoPicker"
         private const val FLAG = "x_handled_by_nophoto"
     }
 
-    fun XC_LoadPackage.LoadPackageParam.isSystemFramework(): Boolean {
-        return packageName == "android" || appInfo == null
+    override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
+        // Framework classes need one hook per process; system_server has its own callback.
+        if (!param.isFirstPackage || param.packageName == "android") return
+        hookInstrumentation(param.packageName)
+        hookActivity(param.packageName)
+        hookActivityResult(param.packageName)
     }
 
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        when {
-            lpparam.isSystemFramework() -> {
-                hookSystemServices(lpparam)
-            }
-            lpparam.packageName != null -> {
-                hookInstrumentation(lpparam)
-                hookActivity(lpparam)
-                hookActivityResult(lpparam)
-            }
-        }
+    override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
+        hookSystemServices(param.classLoader)
     }
 
-    private fun hookSystemServices(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val classLoader = lpparam.classLoader
+    private fun hookSystemServices(classLoader: ClassLoader) {
         val serviceClasses = listOf(
             "com.android.server.wm.ActivityTaskManagerService",
             "com.android.server.am.ActivityManagerService",
-            "com.android.server.am.ActivityStarter"
+            "com.android.server.wm.ActivityStarter"
         )
 
         for (className in serviceClasses) {
-            val serviceClass = XposedHelpers.findClassIfExists(className, classLoader)
-            if (serviceClass != null) {
-                XposedBridge.hookAllMethods(
-                    serviceClass,
-                    "startActivity",
-                    createIntentInterceptor("System:$className")
-                )
-
-                Log.d(TAG, "Hooked $className")
+            val serviceClass = try {
+                Class.forName(className, false, classLoader)
+            } catch (t: Throwable) {
+                continue
+            }
+            val hooked = hookAllMethods(serviceClass, "startActivity", createIntentInterceptor("System:$className"))
+            if (hooked > 0) {
+                Log.d(TAG, "Hooked $className ($hooked startActivity methods)")
                 return
             }
         }
     }
 
-    private fun createIntentInterceptor(source: String): XC_MethodHook {
-        return object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                for (i in args.indices) {
-                    if (args[i] is Intent) {
-                        val intent = args[i] as Intent
-                        if (isPhotoPickerIntent(intent)) {
-                            logIntentDetails(intent, source)
-                            val newIntent = buildDocumentPickerIntent(intent)
-                            args[i] = newIntent
-
-                            // A null Bundle is not a resolvedType; use the hooked signature.
-                            if ((param.method as java.lang.reflect.Method).parameterTypes
-                                    .getOrNull(i + 1) == String::class.java) {
-                                args[i + 1] = newIntent.type
-                            }
-                            return
-                        }
-                    }
-                }
+    private fun hookAllMethods(
+        clazz: Class<*>,
+        methodName: String,
+        hooker: XposedInterface.Hooker
+    ): Int {
+        var hooked = 0
+        for (method in clazz.declaredMethods) {
+            if (method.name != methodName || Modifier.isAbstract(method.modifiers)) continue
+            try {
+                hook(method).intercept(hooker)
+                hooked++
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to hook ${clazz.name}#$methodName: $t")
             }
         }
+        return hooked
     }
 
-    private fun hookInstrumentation(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun createIntentInterceptor(source: String) = XposedInterface.Hooker { chain ->
+        for (i in chain.args.indices) {
+            val intent = chain.args[i] as? Intent ?: continue
+            if (!isPhotoPickerIntent(intent)) continue
+            logIntentDetails(intent, source)
+            val newIntent = buildDocumentPickerIntent(intent)
+            val args = chain.args.toTypedArray()
+            args[i] = newIntent
+
+            // A null Bundle is not a resolvedType; use the hooked signature.
+            if (chain.executable.parameterTypes.getOrNull(i + 1) == String::class.java) {
+                args[i + 1] = newIntent.type
+            }
+            return@Hooker chain.proceed(args)
+        }
+        chain.proceed()
+    }
+
+    private fun hookInstrumentation(packageName: String) {
         try {
-            XposedBridge.hookAllMethods(
+            hookAllMethods(
                 android.app.Instrumentation::class.java,
                 "execStartActivity",
                 createIntentInterceptor("Instrumentation.execStartActivity")
             )
-            Log.d(TAG, "Hooked Instrumentation for ${lpparam.packageName}")
+            Log.d(TAG, "Hooked Instrumentation for $packageName")
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook Instrumentation: ${t.message}")
+            Log.e(TAG, "Failed to hook Instrumentation: ${t.message}")
         }
     }
 
-    private fun hookActivity(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookActivity(packageName: String) {
         try {
             val activityMethods = listOf("startActivity", "startActivityForResult")
 
             for (methodName in activityMethods) {
-                XposedBridge.hookAllMethods(
+                hookAllMethods(
                     Activity::class.java,
                     methodName,
                     createIntentInterceptor("App.Activity.$methodName")
                 )
             }
-            Log.d(TAG, "Successfully hooked Activity methods for ${lpparam.packageName}")
+            Log.d(TAG, "Successfully hooked Activity methods for $packageName")
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook Activity: ${t.message}")
+            Log.e(TAG, "Failed to hook Activity: ${t.message}")
         }
     }
 
-    private fun hookActivityResult(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookActivityResult(packageName: String) {
         try {
-            XposedHelpers.findAndHookMethod(
-                Activity::class.java,
+            val onActivityResult = Activity::class.java.getDeclaredMethod(
                 "onActivityResult",
                 Int::class.javaPrimitiveType,
                 Int::class.javaPrimitiveType,
-                Intent::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val requestCode = param.args[0] as Int
-                        val resultCode = param.args[1] as Int
-                        val data = param.args[2] as? Intent
-
-                        // Skip if canceled or no data
-                        if (resultCode != Activity.RESULT_OK || data == null) return
-
-                        val hasContent = when {
-                            data.data != null -> true
-                            data.clipData?.let { clipData ->
-                                (0 until clipData.itemCount).any { clipData.getItemAt(it).uri != null }
-                            } ?: false -> true
-                            data.hasExtra(Intent.EXTRA_STREAM) -> true
-                            data.hasExtra(Intent.EXTRA_CONTENT_ANNOTATIONS) -> true
-                            else -> false
-                        }
-
-                        if (!hasContent) {
-                            Log.d(TAG, "Empty result detected for request $requestCode")
-                            param.args[1] = Activity.RESULT_CANCELED
-                            param.args[2] = null
-                        }
+                Intent::class.java
+            )
+            hook(onActivityResult).intercept(XposedInterface.Hooker { chain ->
+                val resultCode = chain.getArg(1) as Int
+                val data = chain.getArg(2) as? Intent
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    val hasContent = when {
+                        data.data != null -> true
+                        data.clipData?.let { clipData ->
+                            (0 until clipData.itemCount).any { clipData.getItemAt(it).uri != null }
+                        } ?: false -> true
+                        data.hasExtra(Intent.EXTRA_STREAM) -> true
+                        data.hasExtra(Intent.EXTRA_CONTENT_ANNOTATIONS) -> true
+                        else -> false
+                    }
+                    if (!hasContent) {
+                        Log.d(TAG, "Empty result detected for request ${chain.getArg(0)}")
+                        val args = chain.args.toTypedArray()
+                        args[1] = Activity.RESULT_CANCELED
+                        args[2] = null
+                        return@Hooker chain.proceed(args)
                     }
                 }
-            )
+                chain.proceed()
+            })
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: Failed to hook onActivityResult: ${t.message}")
+            Log.e(TAG, "Failed to hook onActivityResult for $packageName: ${t.message}")
         }
     }
 
@@ -193,7 +192,6 @@ class MainHook : IXposedHookLoadPackage {
         return Intent(action).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
 
-            // Handle MIME types
             val mimeTypes = (original.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
                 ?: original.getStringArrayExtra("android.provider.extra.MIME_TYPES")
                 ?: original.getStringArrayExtra("androidx.activity.result.contract.extra.PickVisualMedia.MimeType"))
@@ -206,7 +204,6 @@ class MainHook : IXposedHookLoadPackage {
                 putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
             }
 
-            // Handle multi-select with API compatibility
             val allowMultiple = original.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
             val maxItems = getMaxItems(original)
 
